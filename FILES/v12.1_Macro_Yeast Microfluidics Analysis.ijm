@@ -778,7 +778,8 @@ if (runanalysis == "Yes") {
 		
 			//Fluorescence Results.
 			run("Read and Write Excel", "dataset_label=[" + chamber + "] no_count_column file=[" + output + "Results/Results_" + chosenROIs + "_" + date + "_" + strain + "_" + sensor + ".xlsx] sheet=[" + chamber + "_fluo]");
-			close("Results");
+			
+close("Results");
 			
 			//Summary of fluorescent ratio stacks
 			for (k = 0; k < Ratio_Names.length; k++){
