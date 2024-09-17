@@ -34,6 +34,6 @@ Created: December, 2023.
 The scripts were tested with: 
 1. R Version 4.3.1 (2021-11-01) 
 2. RStudio (2021.09.2 Build 382) 
-3. ImageJ 1.53t 
+3. ImageJ 1.54j 
 
 Acknowledgment of support: This material is based upon work supported by the Novo Nordisk Foundation grant DISTINGUISHED INVESTIGATOR 2019 - Research within biotechnology-based synthesis & production (#0055044). 
