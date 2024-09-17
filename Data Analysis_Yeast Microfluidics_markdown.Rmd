@@ -1,0 +1,2187 @@
+---
+title: "Yeast Microfluidic Analysis - Downstream Analysis"
+author: "Luca Torello Pianale"
+date: "June 2023"
+header-includes:
+  - \usepackage{fvextra}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaksymbolleft={},showspaces = false,showtabs = false,breaklines,commandchars=\\\{\}}
+output:
+  pdf_document: default
+  html_document: default
+---
+### SCOPE OF THE MARKDOWN
+
+# Use of the Script + General info
+
+This script analyses the data coming from Fiji (www.fiji.sc). In this case, yeast cells into microfluidic devices are taken into account.  
+The analysed data should be in an output folder (generally, it should be named "Output"), which must contain some subfolders:    
+(1) "Script_Data_Analysis" contains the scripts to analyse the data (current one), plot the data and with functions needed. These files should NOT be removed from here.    
+(2) "Results" contains one or two .xlsx files with all the data coming from either the TrackMate or StarDist segmentation. Each chamber should have 2 sheets, one with information for the morphology of the cells (_phase) and for the fluorescence channels (_fluo).    
+(3) "Edges" contains multiple .csv files, one for each chamber analysed. these" files have the information about the tracking and lineage of cells. The files should be named as "name_identifier.csv" (such as "Edges_XY12.csv"). The important thing is that the identifier should be unique for each chamber in the experiment and it should be in the last position after "_" and before ".csv". Everything prior "_identifier.csv" can also be the same for all the files.       
+(4) "Figures" is an empty folder in which the figures will be saved.    
+<br>
+Important to fill all the information about the experiment in the second chunk, so that the final data will contain it as well!
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      tidy = "styler", fig.width = 10, fig.height = 12)
+
+options(dplyr.summarise.inform = FALSE)
+```
+\newpage
+# GETTING STARTED.
+
+Automatic installation of packages if required and loading.
+
+```{r libraries, message = FALSE}
+
+#Fresh Start
+rm(list = ls())
+try(dev.off(dev.list()["RStudioGD"]), silent=TRUE) 
+
+#R Version used
+R.Version()[["version.string"]]
+
+#Set new working directory
+folder <- getwd()
+folder <- gsub("(.+)\57Scripts(.+)", "\\1", folder)
+setwd(folder)
+
+#Additional Functions
+source(paste0(folder, "/Scripts_Data_Analysis/functions.R"))
+
+#Packages
+requiredPackages <- c("tidyverse", "purrr", "readxl", "writexl", "rstatix",
+                      "ggpubr", "ggplot2", "ggExtra", "janitor")
+
+loadinstall(requiredPackages)
+```
+<br>
+# EXPERIMENTAL DETAILS.  
+
+Fluorescence ratios have been computed on Fiji already for more accurate results.  
+In the case of these experiments:
+(1) "Ratio_UVG" stands for the ratio between UVGFP (ex 390/40 nm, em) and GFP (ex 470/30 nm, em).  
+<br>
+(2) "Ratio_YR" stands for the ratio between the YFP ymYPET (ex nm, em) and the RFP mCherry (ex nm, em).  
+<br>
+(3) "Ratio_CR" stands for the ratio between the CFP mTurquoise2 (ex 420/40 nm, em with DC 455 nm and LP 470 nm) and the RFP mCherry (ex nm).  
+
+```{r Details}
+strain <- "CENPK" #Choose from: CENPK, EthanolRed, PE-2
+date <- "230223" #YYMMDD
+sensor <- "QUEEN" #Choose from: QUEEN, sfpHluorin, GlyOx, RibUPR
+oscillation <- "Starvation" #Identifier to oscillation type
+segmentation <- "TrackMate" #Choose between the TrackMate or StarDist file
+
+time_gap <- 8 #time in minutes between 2 pictures
+frames_n <- 180 #number of analysed frames
+
+#Set channel order. 
+#Here are the default ones for the ScEnSor kit, but replace it upon need.
+if (sensor %in% c("QUEEN", "sfpHluorin")) {
+  ch1 <- "phase_contrast"
+  ch2 <- "GFP"
+  ch3 <- "UVGFP"
+  ch4 <- "NA" #No ch4 in this case, needed in the next chunk! 
+}
+
+if (sensor %in% c("GlyOx", "RibUPR", "PyruEth")) {
+  ch1 <- "mCherry"
+  ch2 <- "YPET"
+  ch3 <- "mTurquoise2"
+  ch4 <- "phase_contrast"
+} 
+```
+\newpage
+# RESULT DATA.  
+
+Import the data for the phase contrast and the fluorescence channels (if present) and add missing information.   
+
+```{r Results}
+
+#List of all excel sheets in the Result file from Fiji
+results <- paste0("/Results/", list.files(paste0(folder, "/Results")))
+file <- grep(paste0("Results_", segmentation), results, value = TRUE, fixed = TRUE)
+list <- excel_sheets(paste0(folder, file))
+
+#Load phase contrast data
+phase_data <- map(
+  list[endsWith(list, "_phase")],
+  ~ read_excel(paste0(folder, file), 
+               sheet= .x, skip = 1, col_names = TRUE) %>% 
+    cbind(chamber = gsub("(.+)_phase", "\\1", .x))) %>%
+  list_rbind() %>% 
+  mutate(Label = gsub(".*:ID(.+):.*", "\\1", Label)) %>%
+  select(-c(Mean, StdDev, Perim., Solidity, AR, Round,
+            FeretX, FeretY, FeretAngle, MinFeret, Feret)) 
+
+#Load fluorescence data
+fluo_data <- map(
+  list[endsWith(list, "_fluo")],
+  ~ read_excel(paste0(folder, file), 
+               sheet= .x, skip = 1, col_names = TRUE) %>% 
+    cbind(chamber = gsub("(.+)_fluo", "\\1", .x))) %>%
+  list_rbind() %>%
+  mutate(channel = case_when(
+               startsWith(Label, "C1") ~ ch1,
+               startsWith(Label, "C2") ~ ch2,
+               startsWith(Label, "C3") ~ ch3,
+               startsWith(Label, "C4") ~ ch4,
+               startsWith(Label, "Ratio_UVG") ~ "Ratio_UVG",
+               startsWith(Label, "Ratio_YR") ~ "Ratio_YR",
+               startsWith(Label, "Ratio_CR") ~ "Ratio_CR"),
+         Label = gsub(".*:ID(.+):.*", "\\1", Label)) %>%
+  filter(str_detect(channel, "Ratio_")) %>%
+  pivot_wider(names_from = channel, values_from = c(Mean, StdDev))
+
+#Merge fluorescence and phase contrast information, add experimental details
+final_data <- merge(phase_data, fluo_data, all.x = TRUE) %>%
+  rename(Time = Slice) %>%
+  select(-starts_with("StdDev")) %>%  #Remove "StdDev" columns
+  rename_all(~ sub("Mean_", "", .x)) %>%  #Removing "Mean_" from column names
+  mutate(Time = (Time-1)*time_gap,
+         across(where(is.numeric), ~ round(.,4)),
+         frequency = case_when(         #important to have it as number for now!
+            chamber %in% c("XY05", "XY07", "XY02") ~ 0,
+            chamber %in% c("XY19", "XY21", "XY15") ~ 1.5,
+            chamber %in% c("XY33", "XY35", "XY27") ~ 6,
+            chamber %in% c("XY39", "XY43", "XY44") ~ 12,
+            chamber %in% c("XY60", "XY54", "XY56") ~ 24,
+            chamber %in% c("XY65", "XY75", "XY79") ~ 48)) %>%
+  filter(Time <= frames_n*time_gap)   
+
+#Add information on the pulse present at each timepoint
+df1 <- data.frame()
+df2 <- final_data %>%
+  select(Time, chamber, frequency) %>%
+  distinct()
+
+for(i in unique(df2$frequency)) {
+  if(i == 0) {
+    df3 <- subset(df2, frequency == i) %>%
+      mutate(pulse = "Feast")
+  } else {
+    vector1 <- seq(240, max(unique(df2$Time)), i)
+    if((length(vector1) %% 2) != 0) vector1 <- vector1[-length(vector1)] #if odd, it will give an error in the next steps
+    
+    #Create a two-column data frame with time ranges in which there were Starvation pulses
+    times <- as.data.frame(matrix(data = vector1, ncol = 2, byrow = T)) 
+    
+    #Add pulse information
+    df3 <- subset(df2, frequency == i) %>%
+      mutate(pulse = map_chr(
+        .x = Time,
+        .f = ~ if_else(
+          condition = any(.x >= times$V1 & .x < times$V2),
+          true = "Starvation", false = "Feast")))
+  } 
+  df1 <- rbind(df1, df3)
+}
+
+final_data <- merge(final_data, df1, all.x = TRUE) %>%
+  mutate(frequency = case_when(frequency == 0 ~ "Control",
+                               frequency == 1.5 ~ "1.5 min", 
+                               frequency == 6 ~ "6 min", 
+                               frequency == 12 ~ "12 min", 
+                               frequency == 24 ~ "24 min", 
+                               frequency == 48 ~ "48 min"))
+
+str(final_data)
+
+#Clean environment
+rm(vector1, times, phase_data, fluo_data, i, list, file, results,
+   list = c(ls()[startsWith(ls(), "ch")], ls()[startsWith(ls(), "df")])) 
+```
+\newpage
+# EDGE DATA.
+
+Needed for tracking and lineage reconstruction. 
+
+```{r Edges}
+
+#List of all file names in the "Edge" folder
+list <- list.files(paste0(folder, "/Edges"))
+
+#Import the data
+#Import files should be in the format "name_chamber identifier.csv" (such as "Edges_XY12.csv") so that the chamber identifier is then picked correctly ("XY12" in the example).
+edge_data <-  map(
+  list,
+  ~ read.csv(paste(folder, "/Edges/", .x, sep = "")) %>% 
+    slice(-c(1:3)) %>% 
+    mutate(chamber = gsub(".*_(.+).csv", "\\1", .x))
+  ) %>% 
+  list_rbind() %>%
+  select(TRACK_ID, SPOT_SOURCE_ID, SPOT_TARGET_ID, chamber) %>%
+  rename(sourceID = SPOT_SOURCE_ID, 
+         targetID = SPOT_TARGET_ID,
+         trackID = TRACK_ID) %>%
+  merge(., final_data[, c("Label", "Time", "chamber", "frequency")],  #Add time information to the data frame
+        by.x = c("sourceID", "chamber"), by.y = c("Label", "chamber")) %>% 
+  filter(Time < frames_n*time_gap) 
+
+#Rename tracks with numbers starting from 1
+for (i in unique(edge_data$chamber)) {
+  vector1 <- unique(subset(edge_data, chamber == i)$trackID)
+  
+  for(k in 1:length(vector1)){
+    edge_data <- edge_data %>%
+    mutate(trackID = if_else(trackID == vector1[k] & chamber == i, 
+                             paste0(rep("a", k), collapse=""), trackID))
+  }}
+
+edge_data <- edge_data %>%
+  mutate(trackID = as.character(str_length(trackID)))
+
+str(edge_data)
+
+#Clean environment
+rm(i, vector1, k, list)
+```
+\newpage
+# TRACKING.  
+
+Depending on the computer and the amount of data, it might take a while for this chunk to run! 
+<br>
+There is the possibility that in some cases Labels are not associated to a cell number during the loop (giving a "NA" in column "Cell" in final_data). These are the results of two events:  
+<br>
+(1) If the Labels are not present in the edge data frame, it might due to the fact that there was no ROI detected by TrackMate in the next slide associated to that cell, so no edge was created. Go back to the .xml file on TrackMate and create a connection manually skipping the slice where no ROI was detected (or just remove that individual ROI from the analysis). The number and the names of these events are summarized by "missing_ROIs" at the end of the script.  
+<br>
+(2) If the Labels are present in the edge data frame, but they have "NA" in column "Cell" in final_data, it might be because those cells are not deriving from division, but they "appeared" in that slice, which is wrong, of course. Go back to the .xml file in Fiji (on TrackMate) and create a new edge connecting that cell to the one it derives from. The number and the names of these events are summarized by "missing_edges" at the end of the script.  
+<br>
+Warning messages "Error in if (min(df1$Time[df1$chamber == k]) == min(edge_data$Time[edge_data$chamber ==  : missing value where TRUE/FALSE needed" might appear if additional rows with unexpected text appear in the edge data frame during the merging of time from final_data. Double check that everything is fine in the previous chunk!  
+<br>
+
+```{r Tracking}
+
+#Check if there are edges or ROIs missing from TrackMate
+#If not 0 for both, double-check that everything is fine in TrackMate!
+NAs_in_final <- final_data$Label[is.na(final_data$Cell)]
+missing_edges <- NAs_in_final[NAs_in_final %in% edge_data$sourceID]
+missing_ROIs <- NAs_in_final[!NAs_in_final %in% edge_data$sourceID]
+
+message("Missing Edges = ", length(missing_edges), 
+        ", Missing ROIs = ", length(missing_ROIs)) 
+
+#Remove chambers that have no tracking
+final_data <- final_data %>% 
+  filter(chamber %in% unique(edge_data$chamber))
+
+#Dummy df for faster lineage reconstruction
+lineage_data <- final_data %>%  
+  select(chamber, frequency, Time, Label, Area) %>%
+  add_column(Cell = NA, trackID = NA, mu = NA)
+
+#Lineage Reconstruction
+for (k in unique(lineage_data$chamber)) {
+  
+  #Smaller df to make the code faster
+  df1 <- subset(edge_data, chamber == k) %>%
+    add_column(used = "no")
+  
+  start <- Sys.time()
+  print(paste0("Analysing chamber: ", k))
+  cell_num <- 1
+  
+  repeat {
+    
+    #For multiple cells in the first pictures
+    if (min(df1$Time) == min(edge_data$Time[edge_data$chamber == k])) {
+      
+      #take sourceID with the lowest time
+      targets <- df1$sourceID[df1$Time == min(df1$Time)]
+      target <- targets[1]
+      row <- which(lineage_data$Label == target & lineage_data$chamber == k)
+      time0 <- lineage_data[row, "Time"]
+        
+      lineage_data[row, "Cell"] <- cell_num
+      lineage_data[row, "trackID"] <- df1$trackID[df1$sourceID == target] 
+        
+      #take the targetID associated to the sourceID just saved
+      target <- df1$targetID[df1$sourceID == target]
+      row <- which(lineage_data$Label == target & lineage_data$chamber == k)
+      
+      lineage_data[row, "Cell"] <- cell_num
+      lineage_data[row, "trackID"] <- df1$trackID[df1$targetID == target] 
+      
+    } else { #For additional cells not in the first picture (daughter cells)  
+        
+      #Take (one of) the targetID(s) with the lowest time available
+      targets <- df1$targetID[df1$Time == min(df1$Time)]  
+      target <- targets[1] 
+      row <- which(lineage_data$Label == target & lineage_data$chamber == k)
+      time0 <- lineage_data[row, "Time"]
+        
+      lineage_data[row, "Cell"] <- cell_num
+      lineage_data[row, "trackID"] <- df1$trackID[df1$targetID == target][1]
+    }
+      
+    df1$used[df1$targetID == target] <- "yes"
+    df1 <- subset(df1, used == "no")
+
+    repeat {
+      
+      #Stop when the reconstruction for one cell is done
+      if (length(df1$sourceID[df1$sourceID == target]) == 0) {break}
+      
+      #For non-dividing cell (sourceID associated with 1 targetID)
+      if (length(df1$targetID[df1$sourceID == target]) == 1) {
+        
+        time1 <- lineage_data[row, "Time"]
+        target <- df1$targetID[df1$sourceID == target]
+        row <- which(lineage_data$Label == target & lineage_data$chamber == k)
+        
+        lineage_data[row, "Cell"] <- cell_num
+        lineage_data[row, "trackID"] <- df1$trackID[df1$targetID == target][1]
+      } 
+        
+      #For dividing cell (sourceID associated with 2 targetID)
+      if (length(df1$targetID[df1$sourceID == target]) > 1) {
+      
+        #targetID associated to the sourceID with the highest area (mother cell)
+        time1 <- lineage_data[row, "Time"]
+        targets <- df1$targetID[df1$sourceID == target]
+        df2 <- subset(lineage_data, Label %in% targets & chamber == k)
+        target <- df2$Label[df2$Area == max(df2$Area)]
+        row <- which(lineage_data$Label == target & lineage_data$chamber == k)
+        
+        lineage_data[row, "Cell"] <- cell_num
+        lineage_data[row, "mu"] <- log(2)/((time1-time0)/60)
+        lineage_data[row, "trackID"] <- df1$trackID[df1$targetID == target][1]
+          
+        #resetting the doubling time after the division
+        time0 <- time1
+        rm(df2)
+      }
+        
+      df1$used[df1$targetID == target] <- "yes"
+      df1 <- subset(df1, used == "no")
+    }
+    
+    #Stop when all the cells in the chamber have been analysed.
+    if (nrow(df1) == 0) {
+      loop_time <- round(as.numeric(Sys.time()-start, units = "mins"), digits = 2)
+      print(paste0("Chamber ", k, " analysed in ", loop_time, " minutes"))
+      break
+    }
+  
+    cell_num <- cell_num +1 #Increase cell count
+    
+    #Save last mu
+    if(log(2)/((time1-time0)/60) < 0.6) lineage_data[row, "mu"] <- log(2)/((time1-time0)/60)
+  }
+}
+
+#Add information to final_data and remove cells that were removed from the tracking.
+final_data <- merge(final_data, lineage_data, all.x = T) %>% 
+  drop_na(Cell) 
+
+str(final_data)
+
+#Clean environment
+rm(lineage_data, start, row, df1, loop_time, NAs_in_final,
+   cell_num, time0, time1, target, targets, k,
+   list = ls()[startsWith(ls(), "missing")]) 
+```
+\newpage
+# DATA REORGANISATION.  
+
+Re-organisation and trimming.  
+
+```{r Reorganisation}
+
+#Select cells that stayed in the chamber for more than 1 hour (at least 8 time points).
+ok_cells <- aggregate(Time ~ frequency + chamber + Cell,
+                      data = final_data, FUN = function(x){NROW(x)}) %>%
+  filter(Time > 7) %>%
+  select(-Time)
+
+#Discard cells whose mu is > 0.6 (artefacts from lineage) and the first 4 hours of the screening (as there are no oscillations there).
+final_data_trim <- merge(final_data, ok_cells) %>%
+  filter(mu < 0.6 | is.na(mu)) %>%
+  filter(Time >= 4*60) 
+
+#Create new data frames for further analysis, while keeping the others as backup
+data_full <- final_data
+data_trim <- final_data_trim
+
+#Re-organize data for easier analysis
+numeric <- names(final_data)[sapply(final_data, is.numeric)]
+functions <- numeric[! numeric %in% c("Time", "Cell")]
+
+map(c("data_full", "data_trim"),
+    ~ eval(as.symbol(.x)) %>%
+      ungroup() %>%
+      pivot_longer(all_of(c(functions)), 
+                   names_to = "Function", 
+                   values_to = "value") %>%
+      mutate(value = round(value, 3)) %>%
+      rbind(., mutate(., trackID = "TOT")) %>%
+      rbind(., mutate(., pulse = "TOT"))) %>% 
+    setNames(c("data_full", "data_trim")) %>% 
+    list2env(.GlobalEnv)
+
+str(data_full)
+
+#Clean environment
+rm(ok_cells, numeric, functions) 
+```
+\newpage
+# ANALYSIS BY CELL & BY TIME.  
+
+Analysis of the functions (phenotypes) for populations at each time point and for each cell across the whole run. Important to compute later on robustness.  
+Here the analysis in conducted by analysing all the cells in the whole run (trackID = "TOT") and also by dividing them based on the trackID (depending on which original cell in the first frame they were deriving from).
+
+```{r Additional_Analysis}
+
+#Prepare some temporary data for analysis
+tmp_data <- pivot_wider(subset(data_full, pulse != "TOT"), 
+                        names_from = "Function", 
+                        values_from = "value") 
+
+#Compute number of cells in each frame                         
+growth <- aggregate(cbind(Number_of_Cells = Time) ~ frequency + chamber + trackID + Time + pulse, 
+                    data =  tmp_data,  
+                    FUN = function(x){NROW(x)}) 
+
+#Compute number of buds in each frame 
+buds <- tmp_data %>%
+  group_by(frequency, chamber, Cell) %>%
+  filter(Time == min(Time)) %>%
+  aggregate(., cbind(Bud_Number = Time) ~ frequency + chamber + trackID + Time + pulse,
+            FUN = function(x){NROW(x)}) 
+
+#Compute division rate (buds/cell/frame)
+growth_curves <- merge(growth, buds, all.x = TRUE) %>%
+  group_by(frequency, chamber, trackID) %>%
+  arrange(Time, .by_group = T) %>%
+  mutate(b_ratio = Bud_Number/lag(Number_of_Cells),
+         across(everything(), ~ replace(., is.na(.), 0)),
+         Number_of_Cells = log(Number_of_Cells)) %>% 
+  select(-c(Bud_Number)) %>%
+  pivot_longer(c("Number_of_Cells", "b_ratio"),
+               names_to = "Function", values_to = "value") %>%
+  rbind(., mutate(., pulse = "TOT"))
+
+data_full <- bind_rows(data_full, growth_curves)
+data_trim <- bind_rows(data_trim, growth_curves %>%
+                         subset(., Function == "b_ratio") %>% 
+                         filter(Time > 4*60))
+
+#Computing general summary of the functions for the whole run
+general_summary <- data_trim %>%
+  ungroup() %>%
+  group_by(frequency, chamber, pulse, trackID, Function) %>%
+  summarise(across(.cols = value, 
+                   .fns = list(mean = ~ mean(.x, na.rm = TRUE),
+                               sd = ~ sd(.x, na.rm = TRUE))))
+
+#Summarising parameters for each time point, only oscillation part
+summary_bytime <- data_full %>%
+  filter(Time >= 4*60) %>%    #only the oscillation part
+  filter(Function != "mu") %>% #useless to compute mu here, replaced by b_ratio
+  group_by(frequency, chamber, trackID, pulse, Function, Time) %>%
+  summarise(across(.cols = value,
+                   .fns = list(mean = ~ mean(.x, na.rm = TRUE),
+                               sd = ~ sd(.x, na.rm = TRUE)))) 
+
+#Summarising parameters for each cell
+summary_bycell <- data_trim %>%
+  filter(trackID != "TOT") %>%  #useless to have trackID "TOT"
+  group_by(frequency, chamber, pulse, trackID, Function, Cell) %>%
+  summarise(across(.cols = value, 
+                   .fns = list(mean = ~ mean(.x, na.rm = TRUE),
+                               sd = ~ sd(.x, na.rm = TRUE)))) %>%
+  mutate(across(everything(), ~ replace(., is.na(.), 0))) 
+
+#Clean environment
+rm(buds, growth, tmp_data)
+```
+<br>
+# SAVE DATA.
+
+Save data.  
+
+```{r SavingData}
+#Export the data frames in an .xlsx file (same file, different sheets)
+name <- paste("/Data_Analysed", date, oscillation, strain, sensor, sep = "_")
+sheets <- list("Data" = add_info(final_data), 
+               "Data_Trim" = add_info(final_data_trim), 
+               "Edges" = add_info(edge_data), 
+               "General_Sum" = add_info(general_summary),
+               "Growth_Curves" = add_info(growth_curves), 
+               "Summary_byTime" = add_info(summary_bytime), 
+               "Summary_byCell" = add_info(summary_bycell))
+write_xlsx(sheets, 
+           path = paste0(folder, paste0(name, ".xlsx")), 
+           use_zip64 = TRUE)
+
+#Clean environment
+rm(sheets, name, edge_data, final_data, final_data_trim)
+```
+\newpage
+# ROBUSTNESS.  
+
+## Robustness of functions over time.
+
+Computing the robustness of each function (phenotype) over time (i.e. how stable a function is over time). Here, different levels of analysis are shown: 
+(1) Robustness of functions at population (stability of mean signal from the population) and single-cell (stability of signal for each single cell) levels.  
+(2) Robustness of functions taking into consideration the whole population (trackID = "TOT") or by dividing the cells based on the TrackID (i.e. based on which of the original cells in the first frame cells derive from).  
+(3) Robustness of functions throughout the whole screening (pulse = "TOT"), considering only the time points in which cells were into the medium with glucose (pulse = "Feast") or only the time points in which cells were into the medium without glucose (pulse = "Starvation").  
+<br>
+
+```{r R_over_time}
+#Data frame to be used to compute "m", the normalization factor in the Robustness formula
+dfm <- subset(general_summary, trackID == "TOT") %>% 
+  rename(value = "value_mean")
+
+#Robustness of functions over time at the population level (_pop)
+Rt_pop <- data_trim %>%
+  filter(Function != "mu") %>% #not continuous
+  group_by(frequency, chamber, Time, pulse, trackID, Function) %>%
+  mutate(value = mean(value, na.rm = TRUE), .keep = "none") %>%
+  distinct() %>%
+  robust(., colR = value, dfm = dfm, groupm = c(pulse, Function),
+         groupR = c(frequency, chamber, trackID, pulse, Function)) 
+
+#Robustness of functions over time at single-cell level
+Rt <- data_trim %>%
+  filter(Function != "b_ratio") %>% #Useless at single-cell level
+  robust(., colR = value, dfm = dfm, groupm = c(pulse, Function),
+         groupR = c(frequency, chamber, trackID, pulse, Function, Cell)) 
+
+#Summary for Robustness of functions over time at single-cell level
+Rt_summary <- Rt %>%
+  rename(mean_sc = mean_value,
+         Rn_sc = Rn) %>%
+  group_by(frequency, chamber, pulse, trackID, Function) %>%
+  mutate(mean_value = mean(mean_sc, na.rm = TRUE),
+         sd_value = sd(mean_sc, na.rm = TRUE),
+         Rn = mean(Rn_sc, na.rm = TRUE),
+         Rn_sd = sd(Rn_sc, na.rm = TRUE), 
+         .keep = "none") %>%
+  distinct() 
+```
+\newpage
+## Robustness of functions across populations.
+
+Computing the robustness of each function across populations in each timepoint (frame) (i.e. how homogeneous the function is among the cells in the same population, i.e. one frame). Here, different levels of analysis are shown: 
+(1) Robustness of functions taking into consideration the whole population (trackID = "TOT") or by dividing the cells based on the TrackID (i.e. based on which of the original cells in the first frame cells derive from).  
+(2) Robustness of functions throughout the whole screening (pulse = "TOT"), considering only the time points in which cells were into the medium with glucose (pulse = "Feast") or only the time points in which cells were into the medium without glucose (pulse = "Starvation").   
+<br>
+
+```{r R_over_frame}
+#Robustness computations
+Rp <- data_full %>%
+  filter(Function != "Number_of_Cells") %>% 
+  filter(Function != "mu") %>% #not continuous
+  filter(Time >= 4) %>% #only oscillation part
+  robust(., colR = value, dfm = dfm, groupm = c(pulse, Function),
+         groupR = c(frequency, chamber, trackID, pulse, Function, Time)) 
+
+#Summary for Robustness of functions across populations
+Rp_summary <- Rp %>%
+    rename(mean_sc = mean_value,
+           Rn_sc = Rn) %>%
+  group_by(frequency, chamber, pulse, trackID, Function) %>%
+  mutate(mean_value = mean(mean_sc, na.rm = TRUE),
+         sd_value = sd(mean_sc, na.rm = TRUE),
+         Rn = mean(Rn_sc, na.rm = TRUE),
+         Rn_sd = sd(Rn_sc, na.rm = TRUE), 
+         .keep = "none") %>%
+  distinct() 
+
+rm(dfm)
+```
+\newpage
+## Robustness Overview and Exporting Data.
+
+Making one single data frame with all the R summaries and exporting the Robustness data.   
+
+```{r SavingRobustness}
+#Merge all R data frames.
+R_Summary <- bind_rows(Rt_pop %>% mutate(R_Type = "Time_pop"), 
+                       Rt_summary %>% mutate(R_Type = "Time_scl"), 
+                       Rp_summary %>% mutate(R_Type = "Populations"))
+
+#Export robustness data frames in an .xlsx file (same file, different sheets)
+name <- paste("/Robustness", date, oscillation, strain, sensor, sep = "_")
+sheets <- list("Rt_sc" = add_info(Rt), 
+               "Rt_pop" = add_info(Rt_pop), 
+               "Rp" = add_info(Rp), 
+               "Sum_Rt" = add_info(Rt_summary), 
+               "Sum_Rp" = add_info(Rp_summary), 
+               "R_Summary" = add_info(R_Summary)) 
+write_xlsx(sheets, 
+           path = paste0(folder, paste0(name, ".xlsx")), 
+           use_zip64 = TRUE)
+
+#Clean environment
+rm(sheets, name)
+```
+\newpage
+# PLOTTING.  
+
+## Data Re-organisation  
+
+<br>
+
+```{r Reorganisation4Plotting, echo = FALSE}
+
+#Import the data 
+
+#Set colours and labels for graphs
+colors_oscillation <- c("#5A5A5A", "#ef8a62", "#bae4bc", 
+                        "#7bccc4", "#43a2ca", "#0868ac")
+
+labels <- c(Area = "Area",
+            mu = "Spec. Growth Rate",
+            Circ. = "Circularity", 
+            Ratio_UVG = "ATP Levels",
+            Number_of_Cells = "ln(Cell Number)",
+            b_ratio = "Budding Ratio")
+
+labels_unit <- c(Area = "Area~(mu*m^2)",
+                 mu = "atop('Spec. Growth','Rate (1/h)')",
+                 Circ. = "Circularity~(a.u.)", 
+                 Ratio_UVG = "atop('ATP Levels', '(Fluo, a.u.)')",
+                 Number_of_Cells = "ln(Cell~Number)",
+                 b_ratio = "atop('Budding Ratio', '(buds/cell)')")
+
+R_unit = c(Time_scl = "R(t)~~(a.u.)",
+           Time_pop = "R(t)~~(a.u.)",
+           Populations = "R(p)~~(a.u.)")
+
+#Re-order all dataframes
+frequencies <- c("Control", "1.5 min", "6 min", 
+                 "12 min", "24 min", "48 min")
+functions <- c("Number_of_Cells", "mu", "b_ratio", 
+               "Ratio_UVG", "Area", "Circ.")
+
+map(names(Filter(is.data.frame, as.list(.GlobalEnv))),
+    ~ eval(as.symbol(.x)) %>%
+      mutate(across(any_of(c("frequency")), 
+                    ~factor(frequency, levels = frequencies)),
+             across(any_of(c("Function")), 
+                    ~factor(Function, levels = functions)))) %>% 
+    setNames(names(Filter(is.data.frame, as.list(.GlobalEnv)))) %>% 
+    list2env(.GlobalEnv)
+```
+\newpage
+## Growth curves
+
+```{r GrowthCurves, echo = FALSE}
+
+#Population
+curves <- ggplot(data = subset(growth_curves, 
+                               Function == "Number_of_Cells" 
+                               & trackID == "TOT")) +
+  aes(y = exp(value), x = Time/60, color = frequency, group = chamber) +
+  stat_summary(fun = mean, geom = "line", linewidth = 1) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0, alpha = 0.5) + 
+  geom_vline(xintercept = c(4), color= "black", linewidth = 0.5) +
+  scale_x_continuous(limits = c(0, 24), breaks = seq(0, 24, by = 4)) +
+  scale_color_manual(breaks = frequencies, values = colors_oscillation) +
+  labs(y = "Number of Cells\n", 
+       x = "\nTime (h)") + 
+  facet_grid(rows = vars(frequency), 
+             scales = "free") +
+  theme_light() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 10, angle = 0),
+        axis.text.y = element_text(size = 10),
+        strip.background.y = element_rect(colour = "black", fill = "black"),
+        strip.text.y = element_text(size = 10, face = "bold.italic", colour = "white"),
+        panel.grid.minor = element_blank(), 
+        panel.spacing.x = unit(0.5, "lines"),
+        panel.spacing.y = unit(1, "lines"), 
+        plot.margin = unit(rep(0.6, 4), "cm"))
+
+#By TrackID
+curves_trackID <- ggplot(data = subset(growth_curves, 
+                                       Function == "Number_of_Cells" 
+                                       & trackID != "TOT")) +
+  aes(y = value, x = Time/60, color = frequency, linetype = trackID) +
+  stat_summary(fun = mean, geom = "line", linewidth = 1) +
+  geom_vline(xintercept = c(4), color= "black", linewidth = 0.5) +
+  scale_x_continuous(limits = c(0, 24), breaks = seq(0, 24, by = 4)) +
+  scale_color_manual(breaks = frequencies, 
+                     values = colors_oscillation,
+                     name = "Frequency") +
+  scale_linetype_discrete(name  = "Subpop.") +
+  labs(y = "ln(Cell Number)\n", 
+       x = "\nTime (h)") + 
+  facet_wrap(~chamber, ncol = 3) +
+  theme_light() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        strip.background = element_rect(colour = "black", fill = "black"),
+        strip.text.x = element_text(size = 10, face = "bold.italic", colour = "white"),
+        panel.grid.minor = element_blank(), 
+        panel.spacing.x = unit(0.5, "lines"),
+        panel.spacing.y = unit(1, "lines"), 
+        plot.margin = unit(rep(0.5, 4), "cm"))
+```
+\newpage
+## Chamber Behaviour Lineplots
+
+Checking the overall behaviour of each chamber (taking into consideration all the cells for each time point).  
+<br>
+
+```{r Chamber_Behaviour, echo = FALSE}
+
+#In the following figure, first the mean function in each time point for each chamber is computed, then the mean between the chambers with the same frequency is computed. Therefore, the error bars represent the standard deviation between chambers (replicates).
+Lineplots <- ggplot(data = subset(data_full, 
+                                  pulse == "TOT" 
+                                  & trackID == "TOT" 
+                                  & Function != "mu") %>%
+                      group_by(Time, chamber, frequency, Function) %>% 
+                      mutate(value = mean(value), .keep = "none") %>%
+                      distinct()) +
+  aes(y = value, x = Time/60, colour = frequency) +
+  stat_summary(fun = mean, geom = "line", linewidth = 1) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar", 
+               fun.args = list(mult = 1), 
+               width = 0, alpha = 0.4) +
+  geom_vline(xintercept = c(4), color= "black", linewidth = 0.5) +
+  scale_x_continuous(limits = c(0, 24), breaks = seq(0, 24, by = 4)) +
+  scale_color_manual(breaks = frequencies, 
+                     values = colors_oscillation) +
+  labs(x = "\nTime (h)", y = "") +
+  facet_grid(cols = vars(frequency), rows = vars(Function), 
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  theme_light() +
+  theme(legend.position = "none",
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 15),
+        strip.placement.y = "outside",
+        strip.background.x = element_rect(colour = "black", fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 15, face = "bold.italic", colour = "white"),
+        strip.text.y = element_text(size = 15, colour = "black"),
+        panel.grid.minor = element_blank(), 
+        panel.spacing.x = unit(0.5, "lines"),
+        panel.spacing.y = unit(1, "lines"), 
+        plot.margin = unit(rep(0.3, 4), "cm"))
+
+
+#In the following figure, for each chamber, the mean for each time point among the whole population is computed. Each chamber is then plotted individually. Therefore, the error bars represent the distribution of the function in each time point within the population.
+tmp <- data_full %>%
+  filter(Function != "mu") %>%  #Not a continuous variable
+  subset(., pulse == "TOT" & trackID == "TOT")
+
+for(i in unique(tmp$Function)) {
+  
+  assign(paste0("Line_", i), 
+         ggplot(data = subset(tmp, Function == i)) +
+           aes(y = value, x = Time/60, 
+               colour = frequency) +
+           stat_summary(fun = mean, geom = "line", linewidth = 0.7) +
+           stat_summary(fun.data = mean_sdl, geom = "errorbar", 
+                        fun.args = list(mult = 1), 
+                        width = 0, alpha = 0.4) +
+           geom_vline(xintercept = c(4), color= "black", linewidth = 0.5) +
+           scale_x_continuous(limits = c(0, 24), 
+                              breaks = seq(0, 24, by = 4)) +
+           scale_color_manual(breaks = frequencies, 
+                              values = colors_oscillation,
+                              name  = "Frequency") +
+           labs(x = "\nTime (h)", y = parse(text = labels_unit[i])) +
+           facet_wrap(~chamber, ncol = 3) +
+           guides(color = guide_legend(nrow = 1)) +
+           theme_light() +
+           theme(legend.position = "top",
+                 axis.text.x = element_text(size = 8, angle = 0),
+                 axis.text.y = element_text(size = 8),
+                 strip.background = element_rect(colour = "black", 
+                                                 fill = "black"),
+                 strip.text = element_text(size = 8, 
+                                           face = "bold.italic", 
+                                           colour = "white"),
+                 panel.grid.minor = element_blank(), 
+                 panel.spacing.x = unit(0.5, "lines"),
+                 panel.spacing.y = unit(0.5, "lines"), 
+                 plot.margin = unit(rep(0.6, 4), "cm")))
+
+}
+rm(tmp)
+```
+\newpage
+## Function analysis
+
+Checking the overall behaviour of each chamber (taking into consideration all the cells for each timepoint).  
+<br>
+
+```{r Function Analysis, echo = FALSE}
+
+#Function analysis (mean between chambers)
+Funs_dotplot <- ggplot(data = subset(data_trim, 
+                                     pulse == "TOT" & trackID == "TOT") %>%
+                         group_by(chamber, frequency, Function) %>%
+                         mutate(value = mean(value, na.rm = T), 
+                                .keep = "none") %>%
+                         distinct()) +
+  aes(y = value, x = frequency, color = frequency) +
+  stat_summary(fun = mean, geom = "point", 
+               position = position_dodge(width = 0.9), size = 3) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0, position = position_dodge(width = 0.9)) + 
+  scale_color_manual(breaks = frequencies, values = colors_oscillation) +
+  labs(y = "", x = "") +
+  facet_grid(rows = vars(Function), 
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  theme_light() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.text.y = element_text(size = 10),
+        strip.placement = "outside",
+        strip.background.x = element_rect(colour = "black", fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 8, face = "bold.italic", colour = "white"),
+        strip.text.y = element_text(size = 8, colour = "black"),
+        panel.spacing.x = unit(1, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.2, 4), "cm")) 
+
+#Functions keeping chambers separated
+Funs_violin_chambers <- ggplot(data = subset(data_trim %>% rbind(., mutate(., chamber = "Merged")), 
+                                             pulse == "TOT" & trackID == "TOT")) +
+  aes(y = value, x = chamber, fill = frequency) +
+  geom_violin(trim = TRUE, alpha = 0.5) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  stat_summary(fun = mean, geom = "point", position = "identity", color = "red") +
+  stat_summary(data = subset(data_trim, pulse == "TOT" & trackID == "TOT"),
+               fun = mean, geom = "hline", 
+               aes(yintercept = after_stat(y), 
+                   group = frequency, x = 1), 
+               linewidth = 0.3, linetype = "dashed", color = "red") +
+  scale_fill_manual(breaks = frequencies, values = colors_oscillation) +
+  labs(y = "", x = "\nChamber") +
+  facet_grid(cols = vars(frequency),
+             rows = vars(Function), 
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  theme_light() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        strip.placement = "outside",
+        strip.background.x = element_rect(colour = "black", fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 10, face = "bold.italic", colour = "white"),
+        strip.text.y = element_text(size = 10, colour = "black"),
+        panel.spacing.x = unit(1, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.2, 4), "cm")) 
+
+
+#Functions as violin plots, only merged data
+stat.test <- data_trim %>%
+  subset(., trackID == "TOT" & pulse == "TOT") %>% 
+  group_by(Function) %>%
+  t_test(value ~ frequency, ref.group = "Control") %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "frequency", step.increase = 0)
+
+Funs_violin_chambers_merged <- ggplot(data = subset(data_trim, pulse == "TOT" & trackID == "TOT")) +
+  aes(y = value, x = frequency) +
+  geom_violin(aes(fill = frequency), trim = TRUE, alpha = 0.5) +
+  geom_boxplot(aes(fill = frequency), width = 0.1, outlier.shape = NA) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15))) +
+  stat_summary(fun = mean, geom = "point", position = "identity", color = "red") +
+  scale_fill_manual(breaks = frequencies, values = colors_oscillation) +
+  labs(y = "", x = "") +
+  stat_pvalue_manual(stat.test, 
+                     hide.ns = T, remove.bracket = T,
+                     size = 3.5, vjust = -0.01) +
+  facet_grid(rows = vars(Function), 
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  theme_light() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        strip.placement = "outside",
+        strip.background.x = element_rect(colour = "black", fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 10, face = "bold.italic", colour = "white"),
+        strip.text.y = element_text(size = 10, colour = "black"),
+        panel.spacing.x = unit(1, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.2, 4), "cm")) 
+
+#Function analysis by pulse
+stat.test <- data_trim %>%
+  subset(., trackID == "TOT" & Function %in% c("Ratio_UVG", "b_ratio")) %>%
+  group_by(chamber, frequency, Function, pulse) %>%
+  mutate(value = mean(value, na.rm = T),
+         .keep = "none") %>%
+  distinct() %>% 
+  subset(., pulse != "TOT") %>% 
+  subset(., frequency != "Control") %>%
+  group_by(Function, frequency) %>%
+  t_test(value ~ pulse,) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "pulse")
+
+Funs_dotplot_pulse <- ggplot(data = data_trim %>%
+                               subset(., trackID == "TOT" & Function %in% c("Ratio_UVG", "b_ratio")) %>%
+                               group_by(chamber, frequency, Function, pulse) %>%
+                               mutate(value = mean(value, na.rm = T), 
+                                      .keep = "none") %>%
+                               distinct()) +
+  aes(y = value, x = pulse, color = pulse) +
+  stat_summary(fun = mean, geom = "point", 
+               position = position_dodge(width = 0.9),
+               size = 2) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0, position = position_dodge(width = 0.9)) + 
+  scale_color_manual(breaks = c("TOT", "Feast", "Starvation"), 
+                     values = c("black", "#fdcc8a", "#d7301f")) +
+  labs(y = "", 
+       x = "") + 
+  facet_grid(rows = vars(Function),
+             cols = vars(frequency),
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  theme_light() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        strip.placement = "outside",
+        strip.background.x = element_rect(colour = "black", 
+                                          fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 10, 
+                                    face = "bold.italic", 
+                                    colour = "white"),
+        strip.text.y = element_text(size = 10, colour = "black"),
+        panel.spacing.x = unit(1, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.6, 4), "cm")) 
+
+#Function analysis by TrackID
+stat.test <- data_trim %>%
+  subset(., trackID != "TOT" & pulse == "TOT" & chamber != "XY15") %>% 
+  na.omit() %>% 
+  group_by(Function, chamber) %>%
+  kruskal_test(value ~ trackID) %>% 
+  adjust_pvalue(method = "bonferroni") %>%  
+  add_significance("p.adj") %>% 
+  subset(., p.adj.signif != "ns") 
+
+Funs_violin_trackID <- ggplot(data = subset(data_trim, 
+                                            trackID != "TOT"
+                                            & pulse == "TOT"
+                                            & Function != "b_ratio")) + 
+  aes(y = value, x = trackID, fill = frequency) +
+  geom_text(data = stat.test, 
+            aes(label = paste0("ANOVA = ", {p.adj.signif}), group = chamber), 
+            x = Inf, y = Inf, size = 2.5, 
+            hjust = 1, vjust = 1.5, 
+            inherit.aes = F) +
+  geom_violin(trim = TRUE, alpha = 0.5) +
+  stat_summary(fun = mean, geom = "point", color = "red", size = 2) +
+  scale_fill_manual(breaks = frequencies, 
+                    values = colors_oscillation,
+                    name  = "Frequency") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  labs(y = "", x = "\nSubpopulation") + 
+  facet_grid(rows = vars(Function),
+             cols = vars(chamber),
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  guides(fill = guide_legend(nrow = 1)) +
+  theme_light() +
+  theme(legend.position = "top", 
+        axis.text.y = element_text(size = 10),
+        strip.placement = "outside",
+        strip.background.x = element_rect(colour = "black", 
+                                          fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 10, 
+                                    face = "bold.italic", 
+                                    colour = "white"),
+        strip.text.y = element_text(size = 10, 
+                                    colour = "black"),
+        panel.spacing.x = unit(1, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.2, 4), "cm"))
+
+
+rm(stat.test)
+```
+\newpage
+## Robustness Boxplots
+
+Checking the overall behaviour of each chamber (taking into consideration all the cells for each timepoint).  
+<br>
+
+```{r R_boxplots/R, echo = FALSE}
+tmp <- R_Summary %>% 
+  subset(., pulse == "TOT" & trackID == "TOT") %>%
+  group_by(frequency, chamber, R_Type, Function) %>%
+  mutate(mean_value = mean(mean_value),
+         Rn = mean(Rn),
+         .keep = "none") %>%
+  distinct() %>%
+  mutate(frequency = factor(frequency, levels = frequencies),
+         Function = factor(Function, levels = functions))
+
+stat.test <- tmp %>%
+  group_by(R_Type, Function, ) %>%
+  t_test(Rn ~ frequency,
+         ref.group = "Control") %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "frequency",
+                  step.increase = 0)
+
+for(i in c(unique(tmp$R_Type))){
+  
+  if(i == "Populations") yaxis <- "R(p) (a.u.)"
+  if(i == "Time_pop") yaxis <- bquote(R(t)~~(a.u.))
+  if(i == "Time_scl") yaxis <- bquote(R(t)~~(a.u.))
+  
+  assign(paste0("R_", i),
+         ggplot(data = subset(tmp, R_Type == i)) +
+           aes(y = Rn, x = frequency) +
+           stat_summary(aes(color = frequency),
+                        fun = mean, geom = "point", 
+                        position = "identity", size = 3) +
+           stat_summary(aes(color = frequency),
+                        fun.data = mean_sdl, geom = "errorbar",
+                        fun.args = list(mult = 1),
+                        width = 0) +
+           scale_color_manual(breaks = frequencies, 
+                             values = colors_oscillation) +
+           labs(x = "", 
+                y = yaxis) +
+           stat_pvalue_manual(subset(stat.test, R_Type == i),
+                              label = "p.adj.signif",
+                              hide.ns = T, remove.bracket = T,
+                              size = 3.5) +
+           facet_grid(rows = vars(Function),
+                      cols = vars(R_Type),
+                      scales = "free",
+                      labeller = labeller(Function = labels)) +
+           #guides(fill = guide_legend(nrow = 2)) +
+           theme_light() +
+           theme(legend.position = "none",
+                 axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+                 axis.text.y = element_text(size = 10),
+                 strip.placement = "outside",
+                 strip.background.y = element_rect(colour = "black", fill = "black"),
+                 strip.background.x = element_blank(),
+                 strip.text.y = element_text(size = 10, face = "bold.italic", colour = "white"),
+                 panel.spacing.x = unit(1, "lines"),
+                 panel.spacing.y = unit(0.7, "lines"), 
+                 panel.grid.minor = element_blank(), 
+                 panel.grid.major.x = element_blank(),
+                 plot.margin = unit(rep(0.4, 4), "cm")))
+}
+rm(tmp)
+```
+\newpage
+## Robustness - Violin Plots
+
+Checking the overall behaviour of each chamber (taking into consideration all the cells for each time point).  
+<br>
+
+```{r R_Violin, echo = FALSE}
+
+#Aestetics
+plot_aes <- list(geom_violin(aes(fill = frequency), 
+                             trim = TRUE, alpha = 0.5),
+                 geom_boxplot(aes(fill = frequency), 
+                              width = 0.1, outlier.shape = NA),
+                 stat_summary(fun = mean, geom = "point", 
+                              position = "identity", color = "red"),
+                 scale_fill_manual(breaks = frequencies, 
+                                   values = colors_oscillation,
+                                   name  = "Frequency"),
+                 scale_y_continuous(expand = expansion(mult = c(0, 0.1))),
+                 theme_light(),
+                 guides(fill = guide_legend(nrow = 1)),
+                 theme(legend.position = "none",
+                       axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+                       axis.text.y = element_text(size = 10),
+                       strip.placement = "outside",
+                       strip.background = element_rect(colour = "black", fill = "black"),
+                       strip.text = element_text(size = 10, face = "bold.italic", colour = "white"),
+                       panel.spacing.x = unit(1, "lines"),
+                       panel.spacing.y = unit(0.7, "lines"), 
+                       panel.grid.minor = element_blank(), 
+                       panel.grid.major.x = element_blank(),
+                       plot.margin = unit(rep(0.4, 4), "cm")))
+
+
+#Robustness over time (overview)
+R_violin_Rt <- ggplot(data = Rt %>%
+                            rbind(., mutate(., chamber = "Merged")) %>%
+                            subset(., pulse == "TOT" & trackID == "TOT")) + 
+  aes(x = chamber, y = Rn) +
+  plot_aes +
+  facet_grid(cols = vars(frequency),
+             rows = vars(Function), 
+             labeller = labeller(Function = labels),
+             scales = "free") +
+  stat_summary(data = Rt %>% subset(., pulse == "TOT" & trackID == "TOT"),
+               fun = mean, geom = "hline", 
+               aes(yintercept = after_stat(y), 
+                   group = frequency, x = 1), 
+               linewidth = 0.3, linetype = "dashed", color = "red") +
+  labs(x = "\nChamber", y = bquote(R(t)~~(a.u.)))
+
+#Robustness across populations (overview)
+R_violin_Rp <- ggplot(data = subset(Rp %>%
+                                      rbind(., mutate(., chamber = "Merged")), 
+                                    trackID == "TOT" & pulse == "TOT")) +
+  aes(x = chamber, y = Rn) +
+  plot_aes +
+  facet_grid(cols = vars(frequency),
+             rows = vars(Function), 
+             labeller = labeller(Function = labels),
+             scales = "free") +
+  stat_summary(data = Rp %>% subset(., pulse == "TOT" & trackID == "TOT"),
+               fun = mean, geom = "hline", 
+               aes(yintercept = after_stat(y), 
+                   group = frequency, x = 1), 
+               linewidth = 0.3, linetype = "dashed", color = "red") +
+  labs(x = "\nChamber", y = "R(p) (a.u.)") 
+
+
+#Aestetics
+plot_aes <- list(geom_violin(aes(fill = frequency), 
+                             trim = TRUE, alpha = 0.5),
+                 geom_boxplot(aes(fill = frequency), 
+                              width = 0.1, outlier.shape = NA),
+                 stat_summary(fun = mean, geom = "point", 
+                              position = "identity", color = "red"),
+                 scale_fill_manual(breaks = frequencies, 
+                                   values = colors_oscillation,
+                                   name  = "Frequency"),
+                 scale_y_continuous(expand = expansion(mult = c(0, 0.1))),
+                 theme_light(),
+                 guides(fill = guide_legend(nrow = 1)),
+                 theme(legend.position = "none",
+                       axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+                       axis.text.y = element_text(size = 10),
+                       strip.placement = "outside",
+                       strip.background.y = element_rect(colour = "black", fill = "black"),
+                       strip.background.x = element_blank(),
+                       strip.text.y = element_text(size = 10, face = "bold.italic", colour = "white"),
+                       panel.spacing.x = unit(1, "lines"),
+                       panel.spacing.y = unit(0.7, "lines"), 
+                       panel.grid.minor = element_blank(), 
+                       panel.grid.major.x = element_blank(),
+                       plot.margin = unit(rep(0.4, 4), "cm")))
+
+#Robustness over time (only merged chambers)
+stat.test <- subset(Rt, trackID == "TOT") %>% 
+  group_by(Function) %>%
+  t_test(Rn ~ frequency,
+         ref.group = "Control") %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "frequency",
+                  step.increase = 0)
+
+R_violin_Rt_merged <- ggplot(data = subset(Rt, trackID == "TOT")) +
+  aes(x = frequency, y = Rn) +
+  plot_aes +
+  stat_pvalue_manual(stat.test, 
+                     label = "p.adj.signif",
+                     hide.ns = T, remove.bracket = T,
+                     size = 3.5, vjust = -0.05) +
+  facet_wrap(~ Function, ncol = 1, 
+             labeller = labeller(Function = labels),
+             strip.position = "right", 
+             scales = "free_y") +
+  labs(x = "", y = bquote(R(t)~~(a.u.))) 
+
+#Robustness across populations (only merged chambers)
+stat.test <- subset(Rp, trackID == "TOT") %>% 
+  group_by(Function) %>%
+  t_test(Rn ~ frequency,
+         ref.group = "Control") %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "frequency",
+                  step.increase = 0)
+
+R_violin_Rp_merged <- ggplot(data = subset(Rp, trackID == "TOT")) +
+  aes(x = frequency, y = Rn) +
+  plot_aes +
+  stat_pvalue_manual(stat.test, 
+                     label = "p.adj.signif",
+                     hide.ns = T, remove.bracket = T,
+                     size = 3.5, vjust = -0.1) +
+  facet_wrap(~ Function, ncol = 1, 
+             labeller = labeller(Function = labels),
+             strip.position = "right", 
+             scales = "free_y") +
+  labs(x = "", y = "R(p) (a.u.)") 
+
+rm(stat.test)
+```
+\newpage
+## Robustness by pulse
+
+Checking the overall behaviour of each chamber (taking into consideration all the cells for each timepoint).  
+<br>
+
+```{r R_by_pulse, echo = FALSE}
+
+#Boxplots
+tmp <- R_Summary %>% 
+  subset(., trackID == "TOT" & Function %in% c("Ratio_UVG", "b_ratio")) %>%
+  group_by(frequency, chamber, R_Type, pulse, Function) %>%
+  mutate(mean_value = mean(mean_value),
+         Rn = mean(Rn),
+         .keep = "none") %>%
+  distinct() %>%
+  mutate(frequency = factor(frequency, levels = frequencies),
+         R_Type = factor(R_Type, levels = c("Time_pop", "Time_scl", "Populations")),
+         Function = factor(Function, levels = functions))
+
+stat.test <- tmp %>% 
+  subset(., pulse != "TOT") %>% 
+  subset(., frequency != "Control") %>%
+  group_by(Function, R_Type, frequency) %>%
+  t_test(Rn ~ pulse,) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "pulse")
+
+R_ATP_pulse <- ggplot(data = subset(tmp, Function == "Ratio_UVG")) +
+  aes(y = Rn, x = pulse, color = pulse) +
+  stat_summary(fun = mean, geom = "point", 
+               position = "identity", size = 3) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0) + 
+  scale_color_manual(breaks = c("TOT", "Feast", "Starvation"),
+                     values = c("black", "#fdcc8a", "#d7301f")) +
+  stat_pvalue_manual(stat.test, 
+                     label = "p.adj.signif",
+                     hide.ns = T,
+                     size = 3.5, vjust = -0.05) +
+  facet_grid(rows = vars(R_Type),
+             cols = vars(frequency),
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed),
+                                 R_Type = as_labeller(R_unit, 
+                                                      label_parsed))) +
+  theme_light() +
+  theme(legend.position = "none",
+        legend.title = element_blank(),
+        axis.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        strip.placement = "outside",
+        strip.background.x = element_rect(colour = "black", fill = "black"),
+        strip.background = element_blank(),
+        strip.text.x = element_text(size = 10, face = "bold.italic", colour = "white"),
+        strip.text.y = element_text(size = 11, face = "bold.italic", colour = "black"),
+        panel.spacing.x = unit(0.7, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.2, 4), "cm"))
+
+R_bratio_pulse <- ggplot(data = subset(tmp, Function == "b_ratio")) +
+  aes(y = Rn, x = pulse, color = pulse) +
+  stat_summary(fun = mean, geom = "point", 
+               position = "identity", size = 3) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0) + 
+  scale_color_manual(breaks = c("TOT", "Feast", "Starvation"),
+                     values = c("black", "#fdcc8a", "#d7301f")) +
+  labs(x = "", 
+       y = "Robustness (a.u.)\n") +
+  facet_grid(rows = vars(R_Type),
+             cols = vars(frequency),
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed),
+                                 R_Type = as_labeller(R_unit, 
+                                                      label_parsed))) +
+  theme_light() +
+  theme(legend.position = "none",
+        legend.title = element_blank(),
+        axis.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        strip.placement = "outside",
+        strip.background.x = element_rect(colour = "black", fill = "black"),
+        strip.background = element_blank(),
+        strip.text.x = element_text(size = 10, face = "bold.italic", colour = "white"),
+        strip.text.y = element_text(size = 11, face = "bold.italic", colour = "black"),
+        panel.spacing.x = unit(0.7, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.2, 4), "cm"))
+
+#Aestetics for violin plots
+plot_aes <- list(geom_violin(aes(fill = pulse), trim = TRUE, alpha = 0.5),
+                 geom_boxplot(aes(fill = pulse), width = 0.1, outlier.shape = NA),
+                 stat_summary(fun = mean, geom = "point", position = "identity", color = "red"),
+                 scale_fill_manual(breaks = c("TOT", "Feast", "Starvation"), 
+                                   values = c("black", "#fdcc8a", "#d7301f")),
+                 theme_light(),
+                 theme(legend.position = "none",
+                       axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+                       axis.text.y = element_text(size = 10),
+                       strip.placement = "outside",
+                       strip.background = element_rect(colour = "black", fill = "black"),
+                       strip.text = element_text(size = 10, face = "bold.italic", colour = "white"),
+                       panel.spacing.x = unit(1, "lines"),
+                       panel.spacing.y = unit(0.7, "lines"), 
+                       panel.grid.minor = element_blank(), 
+                       panel.grid.major.x = element_blank(),
+                       plot.margin = unit(rep(0.4, 4), "cm")))
+
+#Robustness over time
+stat.test <- Rt %>%
+  subset(., trackID == "TOT" & Function == "Ratio_UVG") %>% 
+  subset(., pulse != "TOT") %>% 
+  subset(., frequency != "Control") %>%
+  group_by(Function, frequency) %>%
+  t_test(Rn ~ pulse,) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "pulse")
+
+R_violin_Rt_pulse <- ggplot(data = Rt %>%
+                              subset(., trackID == "TOT" 
+                                     & Function == "Ratio_UVG")) + 
+  aes(x = pulse, y = Rn) +
+  plot_aes +
+  stat_pvalue_manual(stat.test, 
+                     label = "p.adj.signif",
+                     hide.ns = T, bracket.nudge.y = 0.01,
+                     tip.length = 0.01) +
+  facet_grid(cols = vars(frequency),
+             rows = vars(Function), 
+             labeller = labeller(Function = labels),
+             scales = "free") +
+  labs(x = "\nPulse", y = bquote(R(t)~~(a.u.)))
+
+
+#Robustness across populations
+stat.test <- Rp %>%
+  subset(., trackID == "TOT" & Function == "Ratio_UVG") %>% 
+  subset(., pulse != "TOT") %>% 
+  subset(., frequency != "Control") %>%
+  group_by(Function, frequency) %>%
+  t_test(Rn ~ pulse,) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "pulse")
+
+R_violin_Rp_pulse <- ggplot(data = Rp %>%
+                                  subset(., trackID == "TOT"
+                                         & Function == "Ratio_UVG")) +
+  aes(x = pulse, y = Rn) +
+  plot_aes +
+  stat_pvalue_manual(stat.test, 
+                     label = "p.adj.signif",
+                     hide.ns = T, bracket.nudge.y = 0.01,
+                     tip.length = 0.01) +
+  facet_grid(cols = vars(frequency),
+             rows = vars(Function), 
+             labeller = labeller(Function = labels),
+             scales = "free") +
+  labs(x = "\nPulse", y = "R(p) (a.u.)") 
+
+
+rm(tmp, stat.test)
+```
+\newpage
+## Robustness vs Performance 
+
+Checking the overall behaviour of each chamber (taking into consideration all the cells for each timepoint).  
+<br>
+
+```{r R_vsPerf/R, echo = FALSE}
+
+tmp <- R_Summary %>% 
+  subset(., pulse == "TOT" & trackID == "TOT") %>%
+  group_by(frequency, R_Type, Function) %>%
+  mutate(mean_R = mean(Rn),
+         mean_Perf = mean(mean_value),
+         sd_R = sd(Rn),
+         sd_Perf = sd(mean_value),
+         .keep = "none") %>%
+  distinct() %>%
+  mutate(frequency = factor(frequency, levels = frequencies),
+         Function = factor(Function, levels = functions))
+
+for(i in tmp$R_Type){ 
+  
+  if(i == "Populations") yaxis <- "R(p) (a.u.)"
+  if(i == "Time_pop") yaxis <- bquote(R(t)~~(a.u.))
+  if(i == "Time_scl") yaxis <- bquote(R(t)~~(a.u.))
+  
+  assign(paste0("R_Perf_", i),  
+         ggplot(data = subset(tmp, R_Type == i)) +
+           aes(x = mean_Perf, y = mean_R, color = frequency) +
+           geom_point(size = 3) +
+           geom_errorbar(aes(x = mean_Perf,
+                             ymax = mean_R + sd_R,
+                             ymin = mean_R - sd_R,
+                             color = frequency), width = 0) +
+           geom_errorbarh(aes(y = mean_R,
+                          xmax = mean_Perf + sd_Perf, 
+                          xmin = mean_Perf - sd_Perf, 
+                          color = frequency), height = 0) +
+           scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)), 
+                              labels = function(x) format(x, nsmall = 1),
+                              limits = c(NA, 0)) +
+           facet_wrap(~Function, nrow = 1,
+                      scales = "free", strip.position = "bottom",
+                      labeller = labeller(Function = as_labeller(labels_unit,
+                                                                 label_parsed))) +
+           labs(x = "", 
+                y = yaxis) +
+           scale_color_manual(breaks = frequencies, 
+                              values = colors_oscillation,
+                              name = "Frequency") +
+           guides(color = guide_legend(nrow = 1)) +
+           theme_light() +
+           theme(legend.position = "top",
+                 legend.text = element_text(size = 10),
+                 axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+                 axis.text.y = element_text(size = 10),
+                 axis.title = element_text(size = 10),
+                 strip.placement = "outside",
+                 strip.background.y = element_rect(colour = "black", fill = "black"),
+                 strip.background.x = element_blank(),
+                 strip.text.y = element_text(size = 10, face = "bold.italic", colour = "white"),
+                 strip.text.x = element_text(size = 10, colour = "black"), 
+                #panel.grid.major = element_blank(),
+                 plot.margin = unit(rep(0.3,4), "cm"),
+                 panel.spacing.x = unit(1, "lines"),
+                 panel.spacing.y = unit(2, "lines"), 
+                 panel.grid.minor = element_blank()))
+}
+
+R_Perf <- ggarrange(R_Perf_Time_pop, R_Perf_Time_scl, R_Perf_Populations,
+                    ncol = 1, nrow = 3,
+                    labels = c("a", "b", "c")) 
+
+rm(tmp)
+```
+\newpage
+## R(p) vs R(t)
+
+Checking the overall behaviour of each chamber (taking into consideration all the cells for each timepoint).  
+<br>
+
+```{r RvsR, echo = FALSE}
+
+#Prepare the data
+tmp <- R_Summary %>% 
+  subset(., pulse == "TOT" & trackID == "TOT") %>%
+  filter(R_Type != "Time_scl") %>%
+  filter(Function != "b_ratio") %>%
+  group_by(frequency, chamber, R_Type, Function) %>%
+  mutate(mean_pop = mean(Rn),
+         .keep = "none") %>%
+  distinct() %>%
+  ungroup() %>% 
+  group_by(frequency, R_Type, Function) %>%
+  mutate(mean_Rn = mean(mean_pop),
+         sd_Rn = sd(mean_pop),
+         .keep = "none") %>%
+  distinct() %>%
+  pivot_wider(., names_from = "R_Type", values_from = c("mean_Rn", "sd_Rn")) %>%
+  mutate(Function = factor(Function, levels = functions))
+
+tmp_lines <- tmp %>%
+  group_by(Function) %>%
+  summarize(mean_x = mean(mean_Rn_Populations),
+            mean_y = mean(mean_Rn_Time_pop))
+
+
+#Plot
+R_R <- ggplot(data = tmp) +
+  aes(x = mean_Rn_Populations, y = mean_Rn_Time_pop, color = frequency) +
+  geom_vline(data = tmp_lines, aes(xintercept = mean_x, group = Function)) +
+  geom_hline(data = tmp_lines, aes(yintercept = mean_y, group = Function)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymax = mean_Rn_Time_pop+sd_Rn_Time_pop, 
+                    ymin = mean_Rn_Time_pop-sd_Rn_Time_pop, 
+                    x = mean_Rn_Populations), width = 0) +
+  geom_errorbarh(aes(xmax = mean_Rn_Populations+sd_Rn_Populations, 
+                     xmin = mean_Rn_Populations-sd_Rn_Populations, 
+                     y = mean_Rn_Time_pop), height = 0) +
+  scale_color_manual(breaks = frequencies, 
+                     values = colors_oscillation,
+                     name = "Frequency") +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)), 
+                     labels = function(x) format(x, nsmall = 1)) +
+  labs(x = "\nR(p) (a.u.)", 
+       y = bquote(atop(R(t)~~(a.u.), ""))) +
+  facet_wrap(~Function, ncol = 3,
+             scales = "free",
+             labeller = labeller(Function = labels)) +
+  guides(color = guide_legend(nrow = 1)) +
+  theme_light() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        strip.background = element_rect(colour = "black", fill = "black"),
+        strip.text = element_text(size = 10, face = "bold.italic", colour = "white"),
+        panel.spacing.x = unit(1, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid = element_blank(), 
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm"))
+
+rm(tmp)
+```
+\newpage
+## For Paper
+<br>
+
+```{r Paper_Figures, echo = FALSE}
+
+#Figure 3
+Fig3a <- ggplot(data = subset(data_full, 
+                              pulse == "TOT" 
+                              & trackID == "TOT" 
+                              & Function %in% c("Number_of_Cells", "b_ratio", "Ratio_UVG")
+                              & frequency %in% c("Control", "1.5 min", "6 min", "48 min")) %>%
+                      group_by(Time, chamber, frequency, Function) %>% 
+                      mutate(value = mean(value), .keep = "none") %>%
+                      distinct()) +
+  aes(y = value, x = Time/60, colour = frequency) +
+  stat_summary(fun = mean, geom = "line", linewidth = 0.7) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar", 
+               fun.args = list(mult = 1), 
+               width = 0, alpha = 0.4) +
+  geom_vline(xintercept = c(4), color= "black", linewidth = 0.5) +
+  scale_x_continuous(limits = c(2, 12), breaks = seq(0, 12, by = 4)) +
+  scale_color_manual(breaks = frequencies, 
+                     values = colors_oscillation) +
+  labs(x = "Time (h)", y = "") +
+  facet_grid(cols = vars(frequency), rows = vars(Function), 
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  theme_light() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 8, angle = 0),
+        axis.text.y = element_text(size = 8),
+        strip.placement.y = "outside",
+        strip.background.x = element_rect(colour = "black", fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 8, face = "bold.italic", colour = "white"),
+        strip.text.y = element_text(size = 9, colour = "black"),
+        panel.grid.minor = element_blank(), 
+        panel.spacing.x = unit(0.5, "lines"),
+        panel.spacing.y = unit(1, "lines"), 
+        plot.margin = unit(rep(0.3, 4), "cm"))
+
+stat.test <- subset(data_trim,
+                    pulse == "TOT" & trackID == "TOT") %>%
+  group_by(chamber, frequency, Function) %>%
+  mutate(value = mean(value, na.rm = T), 
+         .keep = "none") %>%
+  distinct() %>% 
+  group_by(Function) %>%
+  t_test(value ~ frequency,
+         ref.group = "Control") %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  mutate(p.adj.signif = na_if(p.adj.signif, "ns")) %>% 
+  select(Function, group2, p.adj.signif) %>% 
+  rename(frequency = "group2")
+
+tmp <- subset(data_trim, 
+              pulse == "TOT" & trackID == "TOT") %>%
+  group_by(chamber, frequency, Function) %>%
+  mutate(value = mean(value, na.rm = T), 
+         .keep = "none") %>%
+  distinct() %>% 
+  merge(., stat.test, all.x = T) 
+
+Fig3b <- ggplot(data = tmp) +
+  aes(y = value, x = frequency, color = frequency) +
+  stat_summary(fun = mean, geom = "point", 
+               position = position_dodge(width = 0.9), size = 3) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0, position = position_dodge(width = 0.9)) + 
+  stat_summary(geom = "text", fun = max, 
+               aes(label = p.adj.signif), size = 4,
+               color = "black", vjust = -1) +
+  scale_color_manual(breaks = frequencies, 
+                     values = colors_oscillation,
+                     name  = "Frequency") +
+  facet_wrap(~Function, nrow = 2, ncol = 3,
+             scales = "free", strip.position = "left", 
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  guides(color = guide_legend(nrow = 3, byrow = T)) + 
+  theme_light() +
+  theme(legend.position = c(0.85, 0.22), 
+        legend.background = element_rect(linewidth = 0.2, 
+                                         colour = "black",
+                                         linetype = "solid"),
+        axis.title = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 9),
+        strip.placement = "outside",
+        strip.background.y = element_blank(),
+        strip.text.y = element_text(size = 9, colour = "black"),
+        panel.spacing.x = unit(1.5, "lines"),
+        panel.spacing.y = unit(1.5, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.3, 4), "cm")) 
+
+#Figure 4
+Fig4a <- ggplot(data = subset(growth_curves,
+                              Function == "Number_of_Cells" 
+                              & trackID != "TOT"
+                              & chamber %in% c("XY02", "XY19", "XY35", "XY65"))) +
+  aes(y = value, x = Time/60, 
+      color = frequency, linetype = trackID) +
+  stat_summary(fun = mean, geom = "line", linewidth = 1) +
+  geom_vline(xintercept = c(4), color= "black", linewidth = 0.5) +
+  scale_x_continuous(limits = c(0, 12), breaks = seq(0, 12, by = 4)) +
+  scale_color_manual(breaks = frequencies, 
+                     values = colors_oscillation,
+                     name  = "Frequency") +
+  scale_linetype_discrete(name  ="Subpop.") +
+  labs(y = "ln(Cell Number)\n", 
+       x = "Time (h)") + 
+  facet_wrap(~chamber, nrow = 1) +
+  theme_light() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 8),
+        strip.background = element_rect(colour = "black", 
+                                        fill = "black"),
+        strip.text.x = element_text(size = 8, 
+                                    face = "bold.italic", 
+                                    colour = "white"),
+        panel.grid.minor = element_blank(), 
+        panel.spacing.x = unit(0.5, "lines"),
+        panel.spacing.y = unit(1, "lines"), 
+        plot.margin = unit(rep(0.2, 4), "cm"))
+
+stat.test <- subset(data_trim, 
+                    trackID != "TOT"
+                    & pulse == "TOT"
+                    & chamber %in% c("XY02", "XY19", "XY35", "XY65") 
+                    & Function %in% c("Ratio_UVG", "mu")) %>% 
+  group_by(Function, chamber) %>%
+  t_test(value ~ trackID) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "trackID") 
+
+Fig4b <- ggplot(data = subset(data_trim, 
+                              trackID != "TOT"
+                              & pulse == "TOT"
+                              & chamber %in% c("XY02", "XY19", "XY35", "XY65") 
+                              & Function %in% c("Ratio_UVG", "mu"))) + 
+  aes(y = value, x = trackID) +
+  geom_violin(aes(y = value, x = trackID, fill = frequency), trim = TRUE, alpha = 0.5) +
+  stat_summary(fun = mean, geom = "point", color = "red", size = 2) +
+  scale_fill_manual(breaks = frequencies, 
+                    values = colors_oscillation,
+                    name = "Frequency") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  stat_pvalue_manual(stat.test, 
+                     label = "p.adj.signif",
+                     hide.ns = T, tip.length = 0.01,
+                     size = 3.5) +
+  labs(y = "", x = "Subpopulation") + 
+  facet_grid(rows = vars(Function),
+             cols = vars(chamber),
+             scales = "free", switch = "y",
+             labeller = labeller(Function = as_labeller(labels_unit, 
+                                                        label_parsed))) +
+  guides(fill = guide_legend(ncol = 1)) +
+  theme_light() +
+  theme(axis.text.y = element_text(size = 8),
+        strip.placement = "outside",
+        strip.background.x = element_rect(colour = "black", 
+                                          fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 8, 
+                                    face = "bold.italic", 
+                                    colour = "white"),
+        strip.text.y = element_text(size = 9, 
+                                    colour = "black"),
+        panel.spacing.x = unit(1, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.5, 4), "cm")) 
+
+#Figure 5
+Fig5a <- ggplot(data = subset(data_full, 
+                              pulse == "TOT" 
+                              & trackID == "TOT" 
+                              & Function %in% c("Ratio_UVG")
+                              & chamber %in% c("XY02", "XY19", "XY35", "XY65"))) +
+  aes(y = value, x = Time/60, colour = frequency, group = Cell) +
+  geom_line(alpha = 0.2) +
+  geom_vline(xintercept = c(4), color= "black", linewidth = 0.5) +
+  scale_x_continuous(limits = c(2, 12), breaks = seq(0, 12, by = 4)) +
+  ylim(NA, 0.7)+
+  geom_line(data = subset(data_full, 
+                              pulse == "TOT" 
+                              & trackID == "TOT" 
+                              & Function %in% c("Ratio_UVG")
+                              & chamber %in% c("XY02", "XY19", "XY35", "XY65") 
+                              & Cell %in% c(1)), 
+            linewidth = 0.6) +
+  scale_color_manual(breaks = frequencies, 
+                     values = colors_oscillation,
+                     name = "Frequency") +
+  labs(x = "Time (h)", y = "ATP Levels\n(Fluo, a.u.)") +
+  facet_grid(cols = vars(chamber)) +
+  theme_light() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(size = 8, angle = 0),
+        axis.text.y = element_text(size = 8),
+        strip.placement.y = "outside",
+        strip.background.x = element_rect(colour = "black", fill = "black"),
+        strip.background.y = element_blank(),
+        strip.text.x = element_text(size = 8, face = "bold.italic", colour = "white"),
+        strip.text.y = element_text(size = 8, colour = "black"),
+        panel.grid.minor = element_blank(), 
+        panel.spacing.x = unit(0.5, "lines"),
+        panel.spacing.y = unit(1, "lines"), 
+        plot.margin = unit(rep(0.2, 4), "cm"))
+
+
+#Figure 6
+tmp <- R_Summary %>% 
+  subset(., pulse == "TOT" & trackID == "TOT" & Function %in% c("b_ratio", "mu", "Ratio_UVG")) %>%
+  group_by(frequency, chamber, R_Type, trackID, pulse, Function) %>%
+  mutate(mean_value = mean(mean_value),
+         Rn = mean(Rn),
+         .keep = "none") %>%
+  distinct() %>%
+  mutate(frequency = factor(frequency, levels = frequencies),
+         Function = factor(Function, levels = functions))
+
+
+stat.test <- tmp %>% 
+  group_by(Function, R_Type) %>%
+  t_test(.,
+         Rn ~ frequency, 
+         ref.group = "Control") %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "frequency", step.increase = 0) 
+
+
+Fig6a <- ggplot(data = subset(tmp, R_Type == "Time_pop")) +
+  aes(y = Rn, x = frequency, color = frequency) +
+  stat_summary(fun = mean, geom = "point", 
+               position = "identity", size = 3) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0) + 
+  stat_pvalue_manual(subset(stat.test, R_Type == "Time_pop"), label = "p.adj.signif",
+                     remove.bracket = T, hide.ns = T) +
+  scale_color_manual(breaks = frequencies, 
+                    values = colors_oscillation) +
+  labs(x = "", y = bquote(R(t)~~(a.u.))) +
+  facet_grid(rows = vars(Function),
+             scales = "free",
+             labeller = labeller(Function = labels)) +
+  theme_light() +
+  theme(legend.position = "none",
+        legend.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.text.y = element_text(size = 8),
+        strip.placement = "outside",
+        strip.background = element_rect(colour = "black", fill = "black"),
+        strip.text = element_text(size = 8, face = "bold.italic", colour = "white"),
+        panel.spacing.x = unit(0.7, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.5, 4), "cm"))
+
+Fig6b <- ggplot(data = subset(tmp, R_Type == "Time_scl")) +
+  aes(y = Rn, x = frequency, color = frequency) +
+  stat_summary(fun = mean, geom = "point", 
+               position = "identity", size = 3) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0) + 
+  stat_pvalue_manual(subset(stat.test, R_Type == "Time_scl"), label = "p.adj.signif",
+                     remove.bracket = T, hide.ns = T) +            
+  scale_color_manual(breaks = frequencies, 
+                    values = colors_oscillation) +
+  labs(x = "", y = bquote(R(t)~~(a.u.))) +
+  facet_grid(rows = vars(Function),
+             scales = "free",
+             labeller = labeller(Function = labels)) +
+  theme_light() +
+  theme(legend.position = "none",
+        legend.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.text.y = element_text(size = 8),
+        strip.placement = "outside",
+        strip.background = element_rect(colour = "black", fill = "black"),
+        strip.text = element_text(size = 8, face = "bold.italic", colour = "white"),
+        panel.spacing.x = unit(0.7, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.5, 4), "cm"))
+
+#Figure 7
+tmp <- R_Summary %>% 
+  subset(., pulse == "TOT" & trackID == "TOT" & Function %in% c("Ratio_UVG")) %>%
+  group_by(frequency, chamber, R_Type, trackID, pulse, Function) %>%
+  mutate(mean_value = mean(mean_value),
+         Rn = mean(Rn),
+         .keep = "none") %>%
+  distinct() %>%
+  mutate(frequency = factor(frequency, levels = frequencies),
+         Function = factor(Function, levels = functions))
+
+stat.test <- tmp %>% 
+  group_by(Function, R_Type) %>%
+  t_test(.,
+         Rn ~ frequency, 
+         ref.group = "Control") %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj") %>% 
+  add_xy_position(x = "frequency", step.increase = 0) 
+
+Fig7b <- ggplot(data = subset(tmp, R_Type == "Populations")) +
+  aes(y = Rn, x = frequency, color = frequency) +
+  #  geom_boxplot()+
+  stat_summary(fun = mean, geom = "point", 
+               position = "identity", size = 3) +
+  stat_summary(fun.data = mean_sdl, geom = "errorbar",
+               fun.args = list(mult = 1),
+               width = 0) + 
+  scale_color_manual(breaks = frequencies, 
+                    values = colors_oscillation) +
+  stat_pvalue_manual(subset(stat.test, R_Type == "Populations"), label = "p.adj.signif",
+                     remove.bracket = T, hide.ns = T) +
+  labs(y = "R(p) (a.u.)\n") +
+  facet_grid(cols = vars(Function),
+             scales = "free",
+             labeller = labeller(Function = labels)) +
+  theme_light() +
+  theme(legend.position = "none",
+        legend.title = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 8),
+        strip.placement = "outside",
+        strip.background = element_rect(colour = "black", fill = "black"),
+        strip.text = element_text(size = 8, face = "bold.italic", colour = "white"),
+        panel.spacing.x = unit(0.7, "lines"),
+        panel.spacing.y = unit(0.7, "lines"), 
+        panel.grid.minor = element_blank(), 
+        panel.grid.major.x = element_blank(),
+        plot.margin = unit(rep(0.5, 4), "cm"))
+
+
+#Figure 8
+tmp <- R_Summary %>% 
+  subset(., pulse == "TOT" & trackID == "TOT") %>%
+  filter(Function == "Ratio_UVG") %>% 
+  group_by(frequency, R_Type, Function) %>%
+  mutate(mean_R = mean(Rn),
+         mean_Perf = mean(mean_value),
+         sd_R = sd(Rn),
+         sd_Perf = sd(mean_value),
+         .keep = "none") %>%
+  distinct() %>%
+  mutate(frequency = factor(frequency, levels = frequencies))
+
+for(i in tmp$R_Type) {
+  assign(paste0("Panel8_", i), 
+         ggplot(data = subset(tmp, R_Type == i)) +
+           aes(x = mean_Perf, y = mean_R, color = frequency) +
+           geom_point(size = 3) +
+           geom_errorbar(aes(x = mean_Perf,
+                             ymax = mean_R + sd_R,
+                             ymin = mean_R - sd_R,
+                             color = frequency), width = 0) +
+           geom_errorbarh(aes(y = mean_R,
+                          xmax = mean_Perf + sd_Perf, 
+                          xmin = mean_Perf - sd_Perf, 
+                          color = frequency), height = 0) +
+           scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)), 
+                              labels = function(x) format(x, nsmall = 1),
+                              limits = c(NA, 0)) +
+           facet_grid(rows = vars(R_Type),
+                      cols = vars(Function),
+                      scales = "free", switch = "y",
+                      labeller = labeller(Function = as_labeller(labels_unit,
+                                                                 label_parsed),
+                                          R_Type = as_labeller(R_unit,
+                                                               label_parsed))) +
+           labs(x = "\nATP Levels (Fluo, a.u.)", 
+                y = "") +
+           scale_color_manual(breaks = frequencies, 
+                              values = colors_oscillation,
+                              name = "Frequency") +
+           guides(color = guide_legend(nrow = 1)) +
+           theme_light() +
+           theme(legend.position = "bottom",
+                 legend.text = element_text(size = 10),
+                 axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+                 axis.text.y = element_text(size = 10),
+                 axis.title = element_text(size = 10),
+                 strip.background = element_blank(),
+                 strip.placement = "outside",
+                 strip.text.x = element_blank(), 
+                 strip.text.y = element_text(size = 10, colour = "black"),
+                #panel.grid.major = element_blank(),
+                 plot.margin = unit(rep(0.5, 4), "cm"),
+                 panel.spacing.x = unit(1, "lines"),
+                 panel.spacing.y = unit(2, "lines"), 
+                 panel.grid.minor = element_blank()))
+         }
+
+Fig8 <- ggarrange(Panel8_Time_pop, Panel8_Time_scl, Panel8_Populations, 
+                  labels = c("a", "b", "c"),
+                  ncol = 3, common.legend = T, legend = "bottom")
+
+rm(tmp, stat.test, list = ls()[startsWith(ls(), "Panel8_")])
+```
+\newpage
+
+# SAVE IMAGES.  
+
+```{r Saving_img}
+
+#Growth Curves
+ggsave(filename = "curves.png", plot = curves, 
+       device = "png", path = paste0(folder, "/Figures"), 
+       width = 8.5, height = 20, unit = "cm", dpi = 300)
+
+#Growth Curves - by TrackID
+ggsave(filename = "curves_trackID.png", plot = curves_trackID, 
+       device = "png", path = paste0(folder, "/Figures"), 
+       width = 18, height = 29, unit = "cm", dpi = 300)
+
+#Line plots 
+ggsave(filename = "Lineplots.png", plot = Lineplots, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 60, height = 30, unit = "cm", dpi = 300)
+
+#Line plots (one for each function) - By chamber
+graphs <- names(as.list(.GlobalEnv))
+for(i in graphs[startsWith(graphs, "Line_")]){
+  ggsave(filename = paste0(i, ".png"), plot = eval(as.symbol(i)), 
+         device = "png", path = paste0(folder, "/Figures"),  
+         width = 19, height = 24, unit = "cm", dpi = 300)
+}
+
+#Dotplot functions
+ggsave(filename = "Funs_dotplot.png", plot = Funs_dotplot, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 10, height = 23, unit = "cm", dpi = 300)
+
+#Violin plot functions (chambers divided)
+ggsave(filename = "Funs_violin_chambers.png", 
+       plot = Funs_violin_chambers, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 25, height = 23, unit = "cm", dpi = 300)
+
+#Violin plot functions (chambers merged only)
+ggsave(filename = "Funs_violin_chambers_merged.png", 
+       plot = Funs_violin_chambers_merged, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 11, height = 18, unit = "cm", dpi = 300)
+
+#Dotplot functions (pulse divided)
+ggsave(filename = "Funs_dotplot_pulse.png", 
+       plot = Funs_dotplot_pulse, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 17, height = 10, unit = "cm", dpi = 300)
+
+#Violin plot functions (trackID divided)
+ggsave(filename = "Funs_violin_trackID.png", 
+       plot = Funs_violin_trackID, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 40, height = 20, unit = "cm", dpi = 300)
+
+#Overview Robustness over time
+Rt_overiew <- ggarrange(R_Time_pop, R_Time_scl, R_violin_Rt_merged,
+                       ncol = 3, nrow = 1,
+                       labels = c("a", "b", "c"))
+
+ggsave(filename = "Rt_overiew.png", plot = Rt_overiew, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 23, height = 18, unit = "cm", dpi = 300)
+
+#Overview Robustness across populations
+Rp_overiew <- ggarrange(R_Populations, R_violin_Rp_merged,
+                       ncol = 2, nrow = 1,
+                       labels = c("a", "b"))
+
+ggsave(filename = "Rp_overiew.png", plot = Rp_overiew, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 15, height = 16, unit = "cm", dpi = 300)
+
+#Violin Robustness (time)
+ggsave(filename = "R_violin_Rt.png", 
+       plot = R_violin_Rt, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 19, height = 19, unit = "cm", dpi = 300)
+
+#Violin Robustness (populations)
+ggsave(filename = "R_violin_Rp.png", 
+       plot = R_violin_Rp, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 19, height = 16, unit = "cm", dpi = 300)
+
+#Robustness - by pulse (ATP ONLY)
+ggsave(filename = "R_ATP_pulse.png", 
+       plot = R_ATP_pulse, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 17, height = 16, unit = "cm", dpi = 300)
+
+#Robustness - by pulse (Budding Ratio ONLY)
+ggsave(filename = "R_bratio_pulse.png", 
+       plot = R_bratio_pulse, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 18, height = 7, unit = "cm", dpi = 300)
+
+#Overview Robustness - by pulse 
+R_overiew_pulse <- ggarrange(R_ATP_pulse, R_bratio_pulse,
+                       ncol = 1, nrow = 2,
+                       heights = c(1, 0.45),
+                       labels = c("a", "b"))
+
+ggsave(filename = "R_overiew_pulse.png", plot = R_overiew_pulse, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 17, height = 19, unit = "cm", dpi = 300)
+
+#Violin Robustness (divided by pulse)
+R_violin_pulse <- ggarrange(R_violin_Rt_pulse, R_violin_Rp_pulse,
+                            ncol = 1, nrow = 2,
+                            labels = c("a", "b"))
+
+ggsave(filename = "R_violin_pulse.png", 
+       plot = R_violin_pulse, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 16, height = 17, unit = "cm", dpi = 300)
+
+#Robustness vs Performance (all R types)
+ggsave(filename = "R_Perf.png", plot = R_Perf, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 22, height = 26, unit = "cm", dpi = 300)
+
+#R(t) vs R(p)
+ggsave(filename = "R_R.png", plot = R_R, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 17, height = 9, unit = "cm", dpi = 300)
+
+
+
+#Final Figures for Paper
+
+#Figure 3
+fig3 <- ggarrange(Fig3a, Fig3b,
+                  ncol = 1, nrow = 2,
+                  heights = c(1, 0.7),
+                  labels = c("a", "b"))
+
+ggsave(filename = "Fig3.png", plot = fig3, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 17, height = 22, unit = "cm", dpi = 300)
+
+#Figure 4
+fig4 <- ggarrange(Fig4a, Fig4b,
+                  ncol = 1, nrow = 2,
+                  heights = c(0.8, 1),
+                  labels = c("a", "b", "c"))
+
+ggsave(filename = "Fig4.png", plot = fig4, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 17, height = 15, unit = "cm", dpi = 300)
+
+#Figure 5
+ggsave(filename = "Fig5a.png", plot = Fig5a, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 17, height = 6.5, unit = "cm", dpi = 300)
+
+#Figure 6
+fig6 <- ggarrange(Fig6a, Fig6b,
+                  ncol = 2, nrow = 1,
+                  labels = c("a", "b"))
+
+ggsave(filename = "Fig6.png", plot = fig6, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 14, height = 10, unit = "cm", dpi = 300)
+
+#Figure 7
+ggsave(filename = "Fig7b.png", plot = Fig7b, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 7, height = 7, unit = "cm", dpi = 300)
+
+#Figure 8
+ggsave(filename = "Fig8.png", plot = Fig8, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 21, height = 7, unit = "cm", dpi = 300)
+
+#Figure 9
+ggsave(filename = "Fig9.png", plot = R_R, 
+       device = "png", path = paste0(folder, "/Figures"),  
+       width = 17, height = 8.5, unit = "cm", dpi = 300)
+```
+\newpage  
+# CITATIONS 
+
+Citations of R Studio and packages used in this script. 
+
+```{r Citations, echo = FALSE}
+
+print(citation(), style = "text")
+
+for(i in c("rmarkdown", requiredPackages)) {
+  print(i); print(citation(i), style = "text"); cat('\n')
+}
+```
